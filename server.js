@@ -24,7 +24,7 @@ const REDIRECT_URI =
 
 let oauthState = null;
 
-// Start server immediately for Render
+// Start server
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Instagram Automation running on port ${PORT}`);
 });
@@ -34,15 +34,15 @@ app.get("/", (req, res) => {
   res.send("Instagram Automation is running!");
 });
 
-// Health check
+// Health
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Start Meta / Instagram login
+// Start Meta login
 app.get("/auth/instagram", (req, res) => {
   if (!META_APP_ID || !META_APP_SECRET) {
-    return res.status(500).send("Meta credentials are missing in Render.");
+    return res.status(500).send("Meta credentials are missing.");
   }
 
   oauthState = crypto.randomBytes(32).toString("hex");
@@ -51,10 +51,11 @@ app.get("/auth/instagram", (req, res) => {
 
   loginUrl.searchParams.set("client_id", META_APP_ID);
   loginUrl.searchParams.set("config_id", META_CONFIG_ID);
+  loginUrl.searchParams.set("display", "popup");
+  loginUrl.searchParams.set("override_default_response_type", "true");
   loginUrl.searchParams.set("redirect_uri", REDIRECT_URI);
   loginUrl.searchParams.set("response_type", "code");
   loginUrl.searchParams.set("state", oauthState);
-  loginUrl.searchParams.set("display", "popup");
   loginUrl.searchParams.set("prompt", "login");
 
   res.redirect(loginUrl.toString());
@@ -70,14 +71,12 @@ app.get("/auth/instagram/callback", async (req, res) => {
     }
 
     if (!code || !state || state !== oauthState) {
-      return res.status(400).send("Invalid login state. Please try login again.");
+      return res.status(400).send("Invalid login state. Please try again.");
     }
 
     oauthState = null;
 
-    const tokenUrl = new URL(
-      `${API_BASE}/oauth/access_token`
-    );
+    const tokenUrl = new URL(`${API_BASE}/oauth/access_token`);
 
     tokenUrl.searchParams.set("client_id", META_APP_ID);
     tokenUrl.searchParams.set("client_secret", META_APP_SECRET);
@@ -92,7 +91,6 @@ app.get("/auth/instagram/callback", async (req, res) => {
       return res.status(400).send("Meta could not issue an access token.");
     }
 
-    // Exchange for a longer-lived Facebook user token
     const longUrl = new URL(`${API_BASE}/oauth/access_token`);
 
     longUrl.searchParams.set("grant_type", "fb_exchange_token");
@@ -104,14 +102,12 @@ app.get("/auth/instagram/callback", async (req, res) => {
     const longData = await longResponse.json();
 
     if (!longResponse.ok || !longData.access_token) {
-      console.error("Long-lived token exchange failed:", longData.error?.message);
-      return res.status(400).send(
-        "Login succeeded, but the longer-lived token exchange failed."
-      );
+      console.error("Token exchange failed:", longData.error?.message);
+      return res.status(400).send("Long-lived token exchange failed.");
     }
 
     res.json({
-      message: "Instagram login successful. Keep this token private.",
+      message: "Login successful. Keep this token private.",
       access_token: longData.access_token,
       token_type: longData.token_type,
       expires_in: longData.expires_in
@@ -174,7 +170,7 @@ app.get("/instagram/media", async (req, res) => {
   }
 });
 
-// Individual media insights
+// Media insights
 app.get("/instagram/media/:mediaId/insights", async (req, res) => {
   try {
     const data = await instagramGet(
