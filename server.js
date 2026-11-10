@@ -1,5 +1,6 @@
 
 const express = require("express");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
@@ -8,15 +9,27 @@ const PORT = process.env.PORT || 3000;
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "my_instagram_token";
 const ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN;
-const API_VERSION = "v27.0";
-const API_BASE = `https://graph.instagram.com/${API_VERSION}`;
 
-// Start the web server immediately for Render
-const httpServer = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Instagram MCP running on port ${PORT}`);
+const META_APP_ID = process.env.META_APP_ID;
+const META_APP_SECRET = process.env.META_APP_SECRET;
+const META_CONFIG_ID = "1806323053624613";
+
+const IG_USER_ID = "17841452153492157";
+
+const API_VERSION = "v27.0";
+const API_BASE = `https://graph.facebook.com/${API_VERSION}`;
+
+const REDIRECT_URI =
+  "https://instagram-auto-reply-96nd.onrender.com/auth/instagram/callback";
+
+let oauthState = null;
+
+// Start server immediately for Render
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Instagram Automation running on port ${PORT}`);
 });
 
-// Home page
+// Home
 app.get("/", (req, res) => {
   res.send("Instagram Automation is running!");
 });
@@ -26,23 +39,88 @@ app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Instagram webhook verification
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+// Start Meta / Instagram login
+app.get("/auth/instagram", (req, res) => {
+  if (!META_APP_ID || !META_APP_SECRET) {
+    return res.status(500).send("Meta credentials are missing in Render.");
   }
 
-  res.sendStatus(403);
+  oauthState = crypto.randomBytes(32).toString("hex");
+
+  const loginUrl = new URL("https://www.facebook.com/dialog/oauth");
+
+  loginUrl.searchParams.set("client_id", META_APP_ID);
+  loginUrl.searchParams.set("config_id", META_CONFIG_ID);
+  loginUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+  loginUrl.searchParams.set("response_type", "code");
+  loginUrl.searchParams.set("state", oauthState);
+  loginUrl.searchParams.set("display", "popup");
+  loginUrl.searchParams.set("prompt", "login");
+
+  res.redirect(loginUrl.toString());
 });
 
-// Instagram webhook receiver
-app.post("/webhook", (req, res) => {
-  console.log(JSON.stringify(req.body, null, 2));
-  res.sendStatus(200);
+// Meta login callback
+app.get("/auth/instagram/callback", async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+
+    if (error) {
+      return res.status(400).send("Meta login was cancelled or denied.");
+    }
+
+    if (!code || !state || state !== oauthState) {
+      return res.status(400).send("Invalid login state. Please try login again.");
+    }
+
+    oauthState = null;
+
+    const tokenUrl = new URL(
+      `${API_BASE}/oauth/access_token`
+    );
+
+    tokenUrl.searchParams.set("client_id", META_APP_ID);
+    tokenUrl.searchParams.set("client_secret", META_APP_SECRET);
+    tokenUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    tokenUrl.searchParams.set("code", code);
+
+    const response = await fetch(tokenUrl);
+    const data = await response.json();
+
+    if (!response.ok || !data.access_token) {
+      console.error("Meta token exchange failed:", data.error?.message);
+      return res.status(400).send("Meta could not issue an access token.");
+    }
+
+    // Exchange for a longer-lived Facebook user token
+    const longUrl = new URL(`${API_BASE}/oauth/access_token`);
+
+    longUrl.searchParams.set("grant_type", "fb_exchange_token");
+    longUrl.searchParams.set("client_id", META_APP_ID);
+    longUrl.searchParams.set("client_secret", META_APP_SECRET);
+    longUrl.searchParams.set("fb_exchange_token", data.access_token);
+
+    const longResponse = await fetch(longUrl);
+    const longData = await longResponse.json();
+
+    if (!longResponse.ok || !longData.access_token) {
+      console.error("Long-lived token exchange failed:", longData.error?.message);
+      return res.status(400).send(
+        "Login succeeded, but the longer-lived token exchange failed."
+      );
+    }
+
+    res.json({
+      message: "Instagram login successful. Keep this token private.",
+      access_token: longData.access_token,
+      token_type: longData.token_type,
+      expires_in: longData.expires_in
+    });
+
+  } catch (error) {
+    console.error("Login callback failed:", error.message);
+    res.status(500).send("Instagram login failed.");
+  }
 });
 
 // Instagram API helper
@@ -72,9 +150,10 @@ async function instagramGet(path, params = {}) {
 // Instagram profile
 app.get("/instagram/profile", async (req, res) => {
   try {
-    const data = await instagramGet("me", {
+    const data = await instagramGet(IG_USER_ID, {
       fields: "id,username,account_type,media_count"
     });
+
     res.json(data);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -84,10 +163,11 @@ app.get("/instagram/profile", async (req, res) => {
 // Instagram media
 app.get("/instagram/media", async (req, res) => {
   try {
-    const data = await instagramGet("me/media", {
+    const data = await instagramGet(`${IG_USER_ID}/media`, {
       fields: "id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count",
       limit: "25"
     });
+
     res.json(data);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -103,6 +183,7 @@ app.get("/instagram/media/:mediaId/insights", async (req, res) => {
         metric: "views,reach,likes,comments,saved,shares,total_interactions"
       }
     );
+
     res.json(data);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -124,7 +205,7 @@ function authenticateMcp(req, res, next) {
   next();
 }
 
-// Initialize MCP after the web server has started
+// Initialize MCP
 async function initializeMcp() {
   try {
     const { McpServer, createMcpHandler } =
@@ -149,7 +230,7 @@ async function initializeMcp() {
         },
         async () => {
           try {
-            const data = await instagramGet("me", {
+            const data = await instagramGet(IG_USER_ID, {
               fields: "id,username,account_type,media_count"
             });
 
@@ -176,7 +257,7 @@ async function initializeMcp() {
         },
         async () => {
           try {
-            const data = await instagramGet("me/media", {
+            const data = await instagramGet(`${IG_USER_ID}/media`, {
               fields: "id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count",
               limit: "25"
             });
@@ -199,7 +280,7 @@ async function initializeMcp() {
       server.registerTool(
         "get_instagram_media_insights",
         {
-          description: "Get views, reach, likes, comments, saves and shares for Instagram media",
+          description: "Get Instagram media views, reach, likes, comments, saves and shares",
           inputSchema: z.object({
             mediaId: z.string().min(1)
           })
@@ -238,6 +319,7 @@ async function initializeMcp() {
     });
 
     console.log("Instagram MCP endpoint initialized.");
+
   } catch (error) {
     console.error("MCP initialization failed:", error);
   }
